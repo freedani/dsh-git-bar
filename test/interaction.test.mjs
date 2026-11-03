@@ -177,9 +177,10 @@ const logReply = {
   dir: '/repo-link',
   hasMore: false,
   commits: [
-    { hash: 'm0000001', short: 'm0000001', subject: 'Merge branch feature', author: 'Ada', when: '2026-10-27T02:00:00Z', parents: ['a0000001', 'b0000001'], refs: [{ name: 'HEAD -> main', kind: 'head' }, { name: 'v1.0', kind: 'tag' }] },
-    { hash: 'a0000001', short: 'a0000001', subject: 'Add page', author: 'Ada', when: '2026-10-26T02:00:00Z', parents: ['c0000001'], refs: [] },
-    { hash: 'b0000001', short: 'b0000001', subject: 'Bump dep', author: 'Bob', when: '2026-10-25T02:00:00Z', parents: ['c0000001'], refs: [{ name: 'origin/feature', kind: 'remote' }] },
+    { hash: 'm0000001', short: 'm0000001', subject: 'Merge branch feature', author: 'Ada', when: '2026-10-27T02:00:00Z', parents: ['a0000001', 'b0000001'], refs: [{ name: 'HEAD -> main', kind: 'head' }, { name: 'v1.0', kind: 'tag' }], pushed: true },
+    { hash: 'a0000001', short: 'a0000001', subject: 'Add page', author: 'Ada', when: '2026-10-26T02:00:00Z', parents: ['c0000001'], refs: [{ name: 'feature/local', kind: 'local' }], pushed: false },
+    { hash: 'b0000001', short: 'b0000001', subject: 'Bump dep', author: 'Bob', when: '2026-10-25T02:00:00Z', parents: ['c0000001'], refs: [{ name: 'origin/feature', kind: 'remote' }], pushed: null },
+    // c0000001 干脆没有 pushed 字段：旧版 Host 就是这个样子，必须当成「未知」而不是未推送。
     { hash: 'c0000001', short: 'c0000001', subject: 'Initial commit', author: 'Ada', when: '2026-10-24T02:00:00Z', parents: [], refs: [] },
   ],
 }
@@ -223,6 +224,13 @@ const commitReply = {
   ],
 }
 const commitDiffReply = { path: 'src/a.js', truncated: false, diff: '@@ -1 +1 @@\n-old line\n+new line\n' }
+// 每笔提交的推送状态：m 已推送（4 个远端分支 → 只点名前 3 个）、a 只在本地、
+// b 没有远端跟踪分支（null）、c 是旧版 Host（字段缺失）。
+const pushByHash = {
+  m0000001: { pushed: true, remoteRefs: ['origin/main', 'origin/release/1.0', 'origin/hotfix', 'origin/perf'] },
+  a0000001: { pushed: false, remoteRefs: [] },
+  b0000001: { pushed: null, remoteRefs: [] },
+}
 let commitMode = 'default'
 // 提交人候选由 /authors 提供：Zoe 只存在于尚未加载的历史里，用来证明候选不依赖当前页。
 let authorsMode = 'ok'
@@ -275,8 +283,23 @@ globalThis.fetch = async (url) => {
   }
   if (text.startsWith('/dsh-git-bar/commit-diff')) return { ok: true, json: async () => commitDiffReply }
   if (text.startsWith('/dsh-git-bar/commit')) {
-    // 'norefs' 模拟「没有任何分支 / 标签指着这笔提交」，详情里不该留一行空引用。
-    return { ok: true, json: async () => (commitMode === 'norefs' ? { ...commitReply, refs: [] } : commitReply) }
+    // 按 hash 回各有各的推送状态；'norefs' 模拟「没有任何分支 / 标签指着这笔提交」，
+    // 详情里不该留一行空引用。
+    const hash = new URLSearchParams(text.slice(text.indexOf('?') + 1)).get('hash') ?? ''
+    const row = logReply.commits.find((commit) => commit.hash === hash) ?? {}
+    const push = pushByHash[hash] ?? {}
+    return {
+      ok: true,
+      json: async () => ({
+        ...commitReply,
+        hash,
+        short: hash,
+        subject: String(row.subject ?? commitReply.subject),
+        when: String(row.when ?? commitReply.when),
+        ...push,
+        ...(commitMode === 'norefs' ? { refs: [] } : {}),
+      }),
+    }
   }
   if (text.startsWith('/dsh-git-bar/log')) return { ok: true, json: async () => (logMode === 'paging' ? pagingReplyFor(text) : logReplyFor(text)) }
   if (text.startsWith('/dsh-git-bar/info')) return { ok: true, json: async () => infoReply }
@@ -316,6 +339,16 @@ await import('../client.js')
 const runtime = createRuntime()
 const plugin = globalThis.__captured.factory(() => runtime.React)
 
+// 「推送状态」那 5 个键给真文案（其余键仍回显 key）：用例要断言屏幕上真的出现
+// 远端分支名与提示语，而不是键名。
+const pushCopy = {
+  'history.localBadge': '本地',
+  'history.localBadgeTitle': '这笔提交还没推送到任何远端分支',
+  'history.pushedTo': '已推送 · {refs}',
+  'history.unpushedLocal': '未推送 · 只在本地的分支上',
+  'history.pushUnknown': '没有远端跟踪分支，无法判断是否已推送',
+}
+
 // 工作区注册表：/repo 与 /repo-link 已注册，/repo-hotfix 未注册，/repo-gone 的目录已被删掉。
 // create 与 host 侧行为一致：同一目录幂等返回已有记录；目录不存在时抛 workspace/invalid-path。
 const workspaceItems = [{ workspaceId: 'ws-1', path: '/repo' }, { workspaceId: 'ws-2', path: '/repo-link' }]
@@ -337,7 +370,7 @@ const services = {
     },
   },
   uiWorkspace: { openWorkspace: async (id) => { requests.push(`open:${id}`) } },
-  locale: { register: () => () => {}, bind: () => (key, params) => (params === undefined ? key : `${key}(${JSON.stringify(params)})`) },
+  locale: { register: () => () => {}, bind: () => (key, params) => (pushCopy[key] ?? (params === undefined ? key : `${key}(${JSON.stringify(params)})`)) },
   sessions: { list: { getSnapshot: () => ({ byId: { s1: { cwd: '/repo-link' } } }) } },
 }
 
@@ -817,5 +850,70 @@ assert.deepEqual(
   'the author search covers the whole history, not just the commits on screen',
 )
 console.log('17 search covers every option OK')
+
+// 18. 列表行只在「确定没推送」的提交上加「本地」徽标：已推送（m）与未知（b 为 null、
+//     c 为旧版 Host 缺字段）一律不加，别给常态制造噪音。
+const rowFor = (hash) => findAll(historyTree, (node) => node.props['data-history-commit'] === hash)[0]
+const badgeIn = (hash) => findAll(rowFor(hash), (node) => node.props['data-history-local'] !== undefined)
+const localBadges = findAll(historyTree, (node) => node.props['data-history-local'] !== undefined)
+assert.equal(localBadges.length, 1, 'only the unpushed commit is marked local')
+assert.deepEqual(textOf(localBadges[0]), ['本地'])
+assert.equal(localBadges[0].type, 'span')
+assert.equal(localBadges[0].props.title, '这笔提交还没推送到任何远端分支')
+assert.equal(localBadges[0].props.style.color, 'var(--dsw-alias-state-warn-label, #b45309)', 'badge is amber')
+assert.equal(localBadges[0].props.style.fontSize, '10px', 'badge shares the ref badge size')
+assert.equal(localBadges[0].props.style.flex, 'none', 'badge keeps its own width instead of being squeezed')
+for (const hash of ['a0000001']) assert.equal(badgeIn(hash).length, 1, `${hash} carries the local badge`)
+for (const hash of ['m0000001', 'b0000001', 'c0000001']) {
+  assert.equal(badgeIn(hash).length, 0, `${hash} must not carry a local badge`)
+}
+// 位置：提交信息之后、refs 徽标之前——先读到「这笔提交是什么」，再读到「它只在本地」。
+const badgeRowChildren = rowFor('a0000001').children
+const badgeIndex = badgeRowChildren.findIndex((child) => child?.props?.['data-history-local'] !== undefined)
+assert.ok(badgeIndex > 0, 'badge is inside the row')
+const rowTexts = badgeRowChildren.map((child) => textOf(child).join(' '))
+assert.equal(rowTexts[badgeIndex - 1], 'Add page', 'badge sits right after the subject')
+assert.equal(rowTexts[badgeIndex + 1], 'feature/local', 'badge comes before the ref badges')
+console.log('18 local badge OK:', localBadges.length, 'badge on a0000001 only')
+
+// 19. 详情逐笔显示推送状态：只在本地 / 已推送（带远端分支名）/ 未知，
+//     文案要能拖选复制；已推送只点名前 3 个远端分支，其余折成 +N。
+const openCommit = async (hash) => {
+  rowFor(hash).props.onClick()
+  await flush()
+  historyTree = runtime.rerender(historyElement)
+  return findAll(historyTree, (node) => typeof node.props['data-history-push'] === 'string')
+}
+const localPush = await openCommit('a0000001')
+assert.equal(localPush.length, 1, 'detail shows exactly one push row')
+assert.equal(localPush[0].props['data-history-push'], 'local')
+assert.equal(localPush[0].props.style.color, 'var(--dsw-alias-state-warn-label, #b45309)', 'unpushed is amber')
+assert.deepEqual(textOf(localPush[0]), ['未推送 · 只在本地的分支上'])
+assert.equal(localPush[0].props.style.userSelect, 'text', 'push row text is selectable')
+assert.equal(localPush[0].props.style.WebkitUserSelect, 'text', 'push row text is selectable (webkit)')
+assert.equal(localPush[0].props.style.cursor, 'text')
+
+const pushedPush = (await openCommit('m0000001'))[0]
+assert.equal(pushedPush.props['data-history-push'], 'pushed')
+assert.equal(
+  textOf(pushedPush).join(''),
+  '已推送 · origin/main, origin/release/1.0, origin/hotfix +1',
+  'remote branch names are spelled out, the fourth folded into +1',
+)
+assert.equal(
+  pushedPush.props.style.color,
+  'var(--dsw-alias-state-business-primary, #1d4ed8)',
+  'a pushed commit is quieter than an unpushed one',
+)
+
+const unknownPush = (await openCommit('b0000001'))[0]
+assert.equal(unknownPush.props['data-history-push'], 'unknown', 'pushed === null is unknown')
+assert.deepEqual(textOf(unknownPush), ['没有远端跟踪分支，无法判断是否已推送'])
+assert.equal(unknownPush.props.style.color, 'var(--dsw-alias-label-tertiary, #9ca3af)')
+
+// 旧版 Host 连 pushed 字段都没有：同样落在 unknown，绝不能误报成「未推送」。
+const legacyPush = (await openCommit('c0000001'))[0]
+assert.equal(legacyPush.props['data-history-push'], 'unknown', 'a missing pushed field is unknown, not local')
+console.log('19 push state in detail OK: local / pushed / unknown / unknown')
 
 console.log('\nALL INTERACTION TESTS PASSED')

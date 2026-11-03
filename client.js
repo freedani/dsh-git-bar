@@ -98,6 +98,8 @@ window.__ModuleLoader__.load({
     const HISTORY_MAX_COMMITS = 3000
     /** Distance from the list bottom, in px, that triggers the next page. */
     const HISTORY_SCROLL_SLACK = 120
+    /** 详情里最多点名列出的远端分支数，其余折成 `+N`。 */
+    const PUSH_REFS_SHOWN = 3
     /** Tallest the filter dropdown's option list may get before it scrolls. */
     const MENU_LIST_MAX = 240
     /** Shortest the filter dropdown's option list may get; below this it flips above the chip. */
@@ -195,6 +197,11 @@ window.__ModuleLoader__.load({
       'history.truncated': '内容过大，仅显示前一部分',
       'history.today': '今天',
       'history.yesterday': '昨天',
+      'history.localBadge': '本地',
+      'history.localBadgeTitle': '这笔提交还没推送到任何远端分支',
+      'history.pushedTo': '已推送 · {refs}',
+      'history.unpushedLocal': '未推送 · 只在本地的分支上',
+      'history.pushUnknown': '没有远端跟踪分支，无法判断是否已推送',
     }
 
     /** English dictionary, checked complete against the zh key set. */
@@ -277,6 +284,11 @@ window.__ModuleLoader__.load({
       'history.truncated': 'Content too large; showing the first part',
       'history.today': 'Today',
       'history.yesterday': 'Yesterday',
+      'history.localBadge': 'local',
+      'history.localBadgeTitle': 'This commit is not on any remote-tracking branch yet',
+      'history.pushedTo': 'Pushed · {refs}',
+      'history.unpushedLocal': 'Not pushed · local branches only',
+      'history.pushUnknown': 'No remote-tracking branch, push state unknown',
     }
 
     const styles = {
@@ -1952,6 +1964,18 @@ window.__ModuleLoader__.load({
         textOverflow: 'ellipsis',
         whiteSpace: 'nowrap',
       },
+      // 只在「没推送」的提交行上出现的小徽标：尺寸套 historyStyles.ref 那一档，
+      // 颜色取警告琥珀。已推送与未知都不加——已推送是常态，多一个徽标只是噪音。
+      localBadge: {
+        flex: 'none',
+        fontSize: '10px',
+        lineHeight: '15px',
+        padding: '0 5px',
+        borderRadius: '999px',
+        border: '1px solid currentColor',
+        color: 'var(--dsw-alias-state-warn-label, #b45309)',
+        whiteSpace: 'nowrap',
+      },
       when: {
         flex: 'none',
         fontSize: '11px',
@@ -2011,6 +2035,18 @@ window.__ModuleLoader__.load({
         borderRadius: '999px',
         border: '1px solid currentColor',
         fontFamily: 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace',
+        fontSize: '11px',
+        lineHeight: '16px',
+        overflowWrap: 'anywhere',
+        userSelect: 'text',
+        WebkitUserSelect: 'text',
+        cursor: 'text',
+      },
+      // 推送状态行：和 detailRefs 一样要能拖选、⌘/Ctrl+C 复制远端分支名。
+      // 颜色按状态在渲染处覆盖（已推送 / 未推送 / 未知三档）。
+      detailPush: {
+        flex: 'none',
+        padding: '0 10px 6px',
         fontSize: '11px',
         lineHeight: '16px',
         overflowWrap: 'anywhere',
@@ -2308,6 +2344,48 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 把 Host 给的推送状态折成详情里那一行的状态、文案与配色。
+     *
+     * `pushed === null` 是「仓库没有远端跟踪分支」，`undefined` 是旧版 Host 根本没这个字段，
+     * 两者都当未知处理——宁可说不知道，也不要谎称已推送。远端分支名超过
+     * `PUSH_REFS_SHOWN` 个时只点名前几个，其余折成 `+N`。
+     *
+     * @param pushed - Host 给的 true | false | null | undefined。
+     * @param remoteRefs - 指着这笔提交的远端分支名。
+     * @param t - 词典函数。
+     * @returns `{ state, text, color }`；state 直接用作 data-history-push。
+     */
+    function pushSummary(pushed, remoteRefs, t) {
+      const names = (Array.isArray(remoteRefs) ? remoteRefs : [])
+        .map((name) => String(name ?? '').trim())
+        .filter((name) => name !== '')
+      if (pushed === false) {
+        return {
+          state: 'local',
+          text: t('history.unpushedLocal'),
+          color: 'var(--dsw-alias-state-warn-label, #b45309)',
+        }
+      }
+      if (pushed === true) {
+        const shown = names.slice(0, PUSH_REFS_SHOWN)
+        const rest = names.length - shown.length
+        const refs = rest > 0 ? `${shown.join(', ')} +${rest}` : shown.join(', ')
+        const template = t('history.pushedTo')
+        return {
+          state: 'pushed',
+          // 远端名一个都没给时把占位符那一段整段去掉，别留一个悬空的「·」。
+          text: refs === '' ? template.replace(' · {refs}', '').replace('{refs}', '').trim() : template.replace('{refs}', refs),
+          color: 'var(--dsw-alias-state-business-primary, #1d4ed8)',
+        }
+      }
+      return {
+        state: 'unknown',
+        text: t('history.pushUnknown'),
+        color: 'var(--dsw-alias-label-tertiary, #9ca3af)',
+      }
+    }
+
+    /**
      * 把 ISO 时间写成「今天 19:15 / 昨天 19:15 / 10/27 19:15」。
      * @param when - Host 返回的 ISO 8601 字符串。
      * @param t - 词典函数。
@@ -2342,7 +2420,7 @@ window.__ModuleLoader__.load({
       const [log, setLog] = React.useState({ phase: 'loading', commits: [], hasMore: false, reason: '', error: '' })
       const [filter, setFilter] = React.useState('')
       const [picked, setPicked] = React.useState('')
-      const [detail, setDetail] = React.useState({ phase: 'idle', subject: '', body: '', short: '', author: '', when: '', files: [], refs: [], error: '', truncated: false })
+      const [detail, setDetail] = React.useState({ phase: 'idle', subject: '', body: '', short: '', author: '', when: '', files: [], refs: [], remoteRefs: [], pushed: null, error: '', truncated: false })
       const [pickedPath, setPickedPath] = React.useState('')
       const [diff, setDiff] = React.useState({ phase: 'idle', text: '', truncated: false })
       const [menu, setMenu] = React.useState('')
@@ -2521,11 +2599,11 @@ window.__ModuleLoader__.load({
 
       React.useEffect(() => {
         if (picked === '') {
-          setDetail({ phase: 'idle', subject: '', body: '', short: '', author: '', when: '', files: [], refs: [], error: '', truncated: false })
+          setDetail({ phase: 'idle', subject: '', body: '', short: '', author: '', when: '', files: [], refs: [], remoteRefs: [], pushed: null, error: '', truncated: false })
           return () => {}
         }
         let live = true
-        setDetail({ phase: 'loading', subject: '', body: '', short: '', author: '', when: '', files: [], refs: [], error: '', truncated: false })
+        setDetail({ phase: 'loading', subject: '', body: '', short: '', author: '', when: '', files: [], refs: [], remoteRefs: [], pushed: null, error: '', truncated: false })
         getJson(COMMIT_ROUTE, { hash: picked })
           .then((body) => {
             if (!live) return
@@ -2538,13 +2616,16 @@ window.__ModuleLoader__.load({
               when: String(body.when ?? ''),
               files: Array.isArray(body.files) ? body.files : [],
               refs: Array.isArray(body.refs) ? body.refs : [],
+              // 旧版 Host 没有这两个字段：pushed 缺省当未知，remoteRefs 缺省当空，别让 .map 崩。
+              remoteRefs: Array.isArray(body.remoteRefs) ? body.remoteRefs : [],
+              pushed: body.pushed === true ? true : body.pushed === false ? false : null,
               error: '',
               truncated: body.truncated === true,
             })
           })
           .catch((error) => {
             if (!live) return
-            setDetail({ phase: 'failed', subject: '', body: '', short: '', author: '', when: '', files: [], refs: [], error: error instanceof Error ? error.message : String(error), truncated: false })
+            setDetail({ phase: 'failed', subject: '', body: '', short: '', author: '', when: '', files: [], refs: [], remoteRefs: [], pushed: null, error: error instanceof Error ? error.message : String(error), truncated: false })
           })
         return () => {
           live = false
@@ -2832,6 +2913,18 @@ window.__ModuleLoader__.load({
                         },
                         h(GraphCell, { row, lanes }),
                         h('span', { style: historyStyles.subject }, String(commit.subject ?? commit.short ?? '')),
+                        // 只有「确定没推送」才加徽标；已推送（true）与未知（null / 缺字段）都不加。
+                        commit.pushed === false
+                          ? h(
+                              'span',
+                              {
+                                style: historyStyles.localBadge,
+                                'data-history-local': '',
+                                title: t('history.localBadgeTitle'),
+                              },
+                              t('history.localBadge'),
+                            )
+                          : null,
                         refs.length === 0
                           ? null
                           : h(
@@ -2911,6 +3004,8 @@ window.__ModuleLoader__.load({
                     ),
                   )
 
+      const push = pushSummary(detail.pushed, detail.remoteRefs, t)
+
       const detailPane =
         picked === ''
           ? h('div', { style: historyStyles.hint }, t('history.pick'))
@@ -2928,6 +3023,13 @@ window.__ModuleLoader__.load({
                     h('span', { style: historyStyles.detailHash }, detail.short),
                   ),
                   h('div', { style: historyStyles.detailMeta }, `${detail.author} · ${formatWhen(detail.when, t)}`),
+                  // 这笔提交在远端有没有：已推送列出远端分支名、只在本地给琥珀提醒、
+                  // 仓库没有远端跟踪分支就说无法判断。文字可拖选复制。
+                  h(
+                    'div',
+                    { style: { ...historyStyles.detailPush, color: push.color }, 'data-history-push': push.state },
+                    push.text,
+                  ),
                   // 这笔提交被哪些分支 / 标签指着。左侧列表里的徽标会被 `maxWidth` 截断、
                   // 又在按钮里不好选，所以详情里把全名列出来，且可拖选复制。
                   detail.refs.length === 0

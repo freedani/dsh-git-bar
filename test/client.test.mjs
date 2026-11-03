@@ -41,10 +41,18 @@ console.log('2 plugin shape OK')
 // 所以按座位名分开存，别再靠「最后一次注册」这种顺序假设。
 const registrations = new Map()
 const injectedSlots = []
+// 词典由 apply() 交给 locale 服务，这里抓住它，才能断言 zh / en 两份字典键齐、值非空。
+let dictionaries
 const ctx = {
   get(name) {
     if (name === 'locale') {
-      return { register: () => () => {}, bind: () => (key) => `T:${key}` }
+      return {
+        register: (_namespace, dict) => {
+          dictionaries = dict
+          return () => {}
+        },
+        bind: () => (key) => `T:${key}`,
+      }
     }
     if (name === 'sessions') {
       return { list: { getSnapshot: () => ({ byId: { 'session-1': { cwd: '/tmp/repo' } } }) } }
@@ -245,5 +253,36 @@ assert.deepEqual(textOf(chips[0]), ['T:history.allBranches'])
 assert.deepEqual(textOf(chips[1]), ['T:history.allAuthors'])
 assert.equal(findAll(filterBar, (node) => node.props['data-history-reset'] !== undefined).length, 0)
 console.log('18 filter row OK:', chips.length, 'chips')
+
+// 19. 推送状态文案：zh / en 两份字典都要有这 5 个键，且都不是空串
+assert.ok(dictionaries !== undefined, 'locale dictionaries captured from apply()')
+const pushKeys = [
+  'history.localBadge',
+  'history.localBadgeTitle',
+  'history.pushedTo',
+  'history.unpushedLocal',
+  'history.pushUnknown',
+]
+for (const language of ['zh', 'en']) {
+  const dict = dictionaries[language]
+  assert.ok(dict !== undefined, `${language} dictionary registered`)
+  for (const key of pushKeys) {
+    assert.equal(typeof dict[key], 'string', `${language} dictionary is missing ${key}`)
+    assert.ok(dict[key].trim() !== '', `${language} dictionary has an empty ${key}`)
+  }
+}
+assert.equal(dictionaries.zh['history.localBadge'], '本地')
+assert.equal(dictionaries.en['history.localBadge'], 'local')
+assert.ok(dictionaries.zh['history.pushUnknown'].includes('无法判断'), dictionaries.zh['history.pushUnknown'])
+assert.ok(dictionaries.en['history.pushUnknown'].includes('unknown'), dictionaries.en['history.pushUnknown'])
+// pushedTo 靠 `{refs}` 占位符塞远端分支名，两份字典都不能把这四个字符弄丢
+assert.ok(dictionaries.zh['history.pushedTo'].includes('{refs}'), dictionaries.zh['history.pushedTo'])
+assert.ok(dictionaries.en['history.pushedTo'].includes('{refs}'), dictionaries.en['history.pushedTo'])
+assert.deepEqual(
+  Object.keys(dictionaries.en).sort(),
+  Object.keys(dictionaries.zh).sort(),
+  'en mirrors every zh key',
+)
+console.log('19 push-state i18n OK:', pushKeys.length, 'keys in zh + en')
 
 console.log('\nALL CLIENT TESTS PASSED')
