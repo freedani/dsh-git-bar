@@ -54,7 +54,12 @@ every commit in the repository, not just the page already loaded. Picking a comm
 message and changed files; the same pane lists the branches and tags that point
 at the commit (the branch `HEAD` sits on, local branches, `origin/<branch>`, tags)
 by their full name, which can be drag-selected and copied; picking a file reads its unified diff inside that
-commit. Scrolling to the bottom loads older commits by itself; there is no
+commit. A commit that no remote-tracking branch reaches carries a `local` badge in
+the list, and its detail says whether it has been pushed: the remote branches that
+contain it, or that it only exists locally. A repository without a remote-tracking
+branch says so instead of claiming every commit is local. Deciding this costs one
+extra `git rev-list` per page, not one call per commit, and nothing is fetched —
+the answer reflects the last fetch, not the network. Scrolling to the bottom loads older commits by itself; there is no
 "load more" button. The tab only reads: no ref, index or worktree is written.
 - nothing here silently scrolls away: a drag that selects text does not also open
   a popover.
@@ -164,17 +169,27 @@ names alphabetical, capped at 500 rows. It exists so the author filter can offer
 people who only appear deeper in the history than the current page.
 
 `GET /dsh-git-bar/log?sessionId=<id>[&limit=1..300][&skip=0..][&branch=<ref>][&author=<text>]`
-— `{ dir, commits, hasMore, truncated, filters: { branch, author } }`, where each commit is `{ hash, short, parents, author, email, when,
-subject, refs: [{ name, kind }] }`. `kind` is `head`, `local`, `remote` or `tag`,
+— `{ dir, commits, hasMore, truncated, hasRemote, filters: { branch, author } }`, where each commit is `{ hash, short, parents, author, email, when,
+subject, refs: [{ name, kind }], pushed }`. `kind` is `head`, `local`, `remote` or `tag`,
 and `name` is the short ref name (the same form `/branches` reports). 60 commits
 by default, 300 at most; `skip` is how many commits the caller already has, which
 is how the panel pages through a history longer than one page.
+`pushed` is `true` when some remote-tracking branch reaches the commit, `false`
+when none does, and `null` when the repository has no remote-tracking branch at
+all (nothing is fetched, so `false` means "not pushed as far as this clone knows");
+`hasRemote` tells those last two cases apart. A page costs one extra `git rev-list`
+whatever its size, and the whole page reports `null` if that call fails or returns
+more than the buffer cap.
 
 `GET /dsh-git-bar/commit?sessionId=<id>&hash=<4..40 hex>` — `{ dir, hash, short,
-parents, author, email, when, subject, body, refs, files, truncated }`, `refs`
+parents, author, email, when, subject, body, refs, pushed, remoteRefs, files, truncated }`, `refs`
 being `[{ name, kind }]` for every branch or tag pointing at the commit (same
 shape as in `/log`, empty when nothing points at it), each file being
 `{ path, status, additions, deletions, binary }`, capped at 500 files.
+`remoteRefs` are the `origin/<branch>`-style names of the remote-tracking branches
+that contain the commit (`origin/HEAD` and other symbolic refs excluded), and
+`pushed` follows the same three-valued rule as in `/log`; a failure to read them
+yields `null` and `[]` rather than failing the whole route.
 
 `GET /dsh-git-bar/commit-diff?sessionId=<id>&hash=<4..40 hex>&path=<repo-relative>`
 — `{ dir, hash, path, diff, truncated }`: one file's unified diff inside that

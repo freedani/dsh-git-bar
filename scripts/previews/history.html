@@ -42,6 +42,7 @@
         <div class="hrow">
           <svg width="24" height="26" viewBox="0 0 24 26" aria-hidden="true"><path d="M6 0L6 26" fill="none" stroke="#4f8cff" stroke-width="1.6" stroke-linecap="round"/><path d="M18 0L18 13" fill="none" stroke="#e879a6" stroke-width="1.6" stroke-linecap="round"/><path d="M18 13L18 26" fill="none" stroke="#e879a6" stroke-width="1.6" stroke-linecap="round"/><circle cx="18" cy="13" r="3.4" fill="#e879a6" stroke="#fff" stroke-width="1.2"/></svg>
           <span class="subject">extract exponential backoff helper</span>
+          <span class="refs"><span class="ref unpushed">本地</span></span>
           <span class="author">Noah Lin</span><span class="when">今天 09:54</span>
         </div>
         <div class="hrow">
@@ -64,6 +65,7 @@
       <div class="hdetail">
         <div class="dhead"><span class="subject">honor Retry-After on 429</span><span class="hash">7c1a9f2</span></div>
         <div class="dmeta">Noah Lin &lt;noah.lin@acme.test&gt; · 今天 10:18</div>
+        <div class="dpush pushed">已推送 · origin/feat/retry-policy</div>
         <div class="drefs"><span>分支 / 标签</span><span class="ref head">feat/retry-policy</span><span class="ref remote">origin/feat/retry-policy</span></div>
         <p class="dbody">429 / 503 都带 Retry-After，指数退避只能当兜底。
 先读响应头，解析不出来再回落到退避序列。
