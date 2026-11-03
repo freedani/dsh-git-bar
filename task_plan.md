@@ -187,3 +187,60 @@ GET /dsh-git-bar/authors?sessionId=<id>[&dir=<abs>]
 4. 无 refs 的提交不渲染空行（不显示标签、不占位）。
 5. 中英 README 的 `/commit` 契约补 `refs`，历史页功能描述补一句「详情里显示引用并可选中复制」。
 6. `npm run check` + `npm test` 全绿。
+
+## 第十轮：历史面板区分「已推送 / 只在本地」（当前任务）
+
+用户（m00001）：「你这个 githistory 面板 需要区分一下 这比提交是在远端还是在本地，或者说区分一下这个提交是否已推送」
+
+### 目标
+Git 历史标签页能一眼看出每笔提交是否已推送：列表行上有可见标记，详情里给出明确结论（含它落在哪个远端分支上）。
+
+### 判定口径（写死，别自己发明）
+- **已推送** = 该提交可从任一非符号的 `refs/remotes/*`（远端跟踪分支）到达。只要在一个远端分支上就算已推送。
+- **只在本地** = 从所有远端跟踪分支都到不了（本地分支 / 只有 tag / `refs/original` 里才有它）。
+- **未知（`null`）** = 仓库根本没有远端跟踪分支（从没 clone/fetch 过的仓库），这时不能谎称「未推送」。
+- 只读：不 fetch、不联网。远端跟踪分支是旧的，就是旧的（文档里说明，不偷偷 fetch）。
+
+### Host 契约（`index.js`）
+```
+GET /dsh-git-bar/log?... →
+  { commits: [{ …, pushed: true|false|null }], hasMore, truncated, hasRemote: boolean, reason? }
+
+GET /dsh-git-bar/commit?... →
+  { dir, hash, …, pushed: true|false|null, remoteRefs: ["origin/master", …] }
+```
+（`/commit` 沿用旧行为：commit 字段摊平在 body 顶层，不套 `commit` 层。）
+- `/log` 一页只多 2 条 git 调用（不是每笔提交一条）：一条 `for-each-ref refs/remotes` 算 `hasRemote`，
+  一条 `rev-list` 以本页所有 hash 为正向起点、
+  以 `--remotes` 与**本页最后一笔提交的父提交**为反向边界，输出的就是本页里«只在本地»
+  的那几笔（窗口外的祖先被父提交挡住，输出量 ≤ 页大小）。窗口没有提交时不跑；
+  父提交直接取 `%P` 已解析出的 `parents`，不再为此多跑一条 `rev-list`。
+  实测（本仓库 7 个 skip 偏移 × 6 笔窗口，与本机 `git branch -r --contains` 逐笔对账）全部一致；命令与证据见 findings.md。
+- `/commit` 用 `git for-each-ref --format=<REMOTE_FORMAT> --contains=<hash> refs/remotes` 拿名字
+  （符号引用 `origin/HEAD` 自带 `%(symref)` 非空，跳过，与 `readRemotes()` 同一套过滤）。
+- git 调用失败一律给 `pushed: null`，不许猜成 true/false。
+- `hasRemote` = `readRemotes(dir).remotes.length > 0`（现成 helper，别新写一套）。
+
+### Client 契约（`client.js`）
+- 列表行：`pushed === false` 时渲染一个小徽标（文字「本地」/`local`，琥珀色），带 `data-history-local`；
+  `true` 与 `null` 不渲染任何东西（已推送是常态，不制造噪音）。
+- 详情：作者行下面一行推送状态，`data-history-push="pushed|local|unknown"`：
+  已推送 → `已推送 · origin/master`（`remoteRefs` 全列，最多 3 个，多的写 `+N`）；
+  只在本地 → `未推送 · 只在本地的分支上`；未知 → `没有远端跟踪分支，无法判断`。
+- i18n 键与英文文案一起加（client.js 自带 zh/en 两份字典）。
+
+### 验收标准（每条都要有真实输出）
+1. `node test/host.test.mjs`：造「有远端」的仓库（clone --bare + 推一笔 + 再提交一笔），断言推送过的 `pushed:true`、
+   新提交 `pushed:false`；造没有远端的仓库，断言 `hasRemote:false` 且每笔 `pushed:null`；`/commit` 断言
+   `remoteRefs` 含 `origin/main`、远端没有的提交 `remoteRefs: []` 且 `pushed:false`。
+2. `node test/client.test.mjs` + `node test/interaction.test.mjs`：行徽标只在未推送时出现、详情三种状态文案正确、
+   `data-history-push` 取值对；i18n 键在 zh/en 都存在（不留 `T:history.*` 之外的裸键）。
+3. 真仓库对账：本仓库 `2420f254`（只在历史 / tag 上）判为未推送，`HEAD` 判为已推送。
+4. `npm run check`、`npm test` 全绿。
+5. 中英 README 的 `/log`、`/commit` 契约同步新字段；`docs/preview-history.png` 用假数据重画并显示徽标。
+
+### 分工（同目录协作，禁跨文件）
+- `host-engine`：`index.js`、`test/host.test.mjs`。
+- `client-ui`：`client.js`、`test/client.test.mjs`、`test/interaction.test.mjs`。
+- Lead：`task_plan.md` / `findings.md` / `progress.md`、`README*.md`、`locale/*.json`、`scripts/previews/history.html`、
+  `docs/preview-history.png`；最后统一验证并本地分阶段提交（不推送）。

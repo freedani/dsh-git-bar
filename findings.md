@@ -149,3 +149,33 @@ headless Chrome fixture 复现（14 行真实分支名、`max-height:248px; padd
   实拍确认「分支 / 标签 feat/retry-policy origin/feat/retry-policy」一行显示正常，颜色与列表徽标一致。
 - 探路记录：`curl http://127.0.0.1:61719/dsh-git-bar/commit?...` 返回 401（web server 要鉴权），
   所以没把「打真机接口」当证据；Host 的验证靠 `test/host.test.mjs` 里真 git 仓库的 44 / 44b。
+
+## 历史面板区分「已推送 / 只在本地」（第十轮）
+
+- 口径：**已推送 = 可从任一非符号 `refs/remotes/*` 到达**；只在本地 = 一个都到不了；`null` = 仓库根本没有远端跟踪分支。
+  没有 fetch，所以 `pushed:false` 的语义是「以本地已有的远端引用看还没推送」，文档里写清楚了，没说成「远端一定没有」。
+- 失败尝试：`git rev-list --no-walk=unsorted --stdin --not --remotes` 想一次判一批包含关系，
+  但它无视 `--no-walk`，会退化成完整祖先遍历（输出爆炸），不能当批量包含判定用。
+- 采用的做法（整页一次调用）：正向起点是本页所有 hash，反向边界是 `--remotes` 加本页最老一笔的父提交：
+  `git rev-list <hash...> --not --remotes <parents...>`，输出里出现的 hash 就是本页«只在本地»的那几笔；
+  窗口外的祖先被父提交挡住，输出量 ≤ 页大小。**参数顺序是硬要求**：正向起点必须在 `--not` 之前
+  （曾用 xargs 把 hash 追加到 `--not` 之后，结果全反）。父提交直接取 `%P` 已解析的 `parents`
+  （最早写成了额外的 `rev-list --no-walk --parents -n 1`，等于每页多起一个进程，已删掉）。
+- 对账证据（真实仓库 /Users/mengjingnan/Documents/deepseek-harness/default-workspace/plugins/dsh-git-bar）：
+  走 route handler 拿 `/log`，再逐笔用 `git branch -r --contains` 独立复核，窗口 limit/skip =
+  60/0、7/0、7/20、7/41、7/42、7/44、300/0 共 133 笔，`bad=[]`；tally 38 true / 10 false，
+  与 `git rev-list --count --all`=48、`--remotes`=38 相符。本地那 10 笔 =
+  dc203be、1a10689、7fe3f1c、6ed9a84、bf896a4、954ba76、de30769、e31c758、d36a82c、2420f25（只在 `refs/original` 与 tag 上）。
+  `/commit` 侧 HEAD b6ae4f0 / fbe6313 → `pushed:true remoteRefs:["origin/master"]`，dc203be / 2420f254 / 1a10689 / 7fe3f1c → `pushed:false remoteRefs:[]`，与 `branch -r --contains` 一致。
+- `/commit` 的单笔判定改用 `for-each-ref --format=<REMOTE_FORMAT> --contains=<hash> refs/remotes`：
+  一次就同时回答「推没推」和「在哪些远端分支上」。**必须过滤 `%(symref)` 非空的行**——
+  `origin/HEAD` 的 `%(refname:short)` 会退化成光秃秃的 `origin`，不过滤就会多出一个假分支；
+  `git branch -r --contains` 同样会把它打出来，所以那一路只用来做外部复核（复核时按含 `/` 过滤）。
+- 失败降级：远端信息读取失败只退化成 `pushed:null` + `remoteRefs:[]`，详情不会整体 404；
+  `/commit` 的 not-a-repository 扁平体刻意不带新字段（那里没有 commit 对象，且用例 46 整块 deepEqual 它）。
+- 未覆盖：`rev-list` 输出被 maxBuffer 截断（overflow）那条分支只有代码路径（已印出的判 false、未印出的留 null），
+  没有实测——造 6000 笔全本地提交的仓库代价太大；代码注释写明了这个取向：截断不等于「都没推送」。
+- Client 侧两个坑：旧版 Host 没有 `pushed` 字段时必须当 unknown（`body.pushed === true ? true : body.pushed === false ? false : null`），
+  否则缺字段会被渲染成「未推送」，等于对用户谎报；详情行 `已推送 · {refs}` 在 `remoteRefs` 为空时要把占位符那段整段摘掉，别留悬空的「·」。
+- 预览图：`scripts/previews/history.html` 给一笔提交加 `.ref.unpushed`「本地」徽标、详情加 `.dpush.pushed`
+  「已推送 · origin/feat/retry-policy」一行，`style.css` 补两条规则，仍全部是假数据（acme-storefront / feat/retry-policy）。

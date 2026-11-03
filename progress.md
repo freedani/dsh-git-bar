@@ -102,3 +102,22 @@
 - 待确认（要用户操作）：**Host 半要重启 DSH 桌面端**才生效（插件是 `link:` 进 desktop profile，Host 代码在进程里），
   然后刷新页面才能看到详情里的分支名。
 - 未做：未升版本、未推送。
+
+## 历史面板区分「已推送 / 只在本地」（第十轮）
+- 已完成（Host `index.js`）：新增 `remoteBranchNames(text)`（统一符号引用过滤）与
+  `readPushedState(dir, commits, hasRemote)`（整页一次 `rev-list`，父提交取 `%P`）；
+  `readLog()` 与 `readRemotes()` 并行，顶层给 `hasRemote`、每行给 `pushed`；
+  `readCommit()` 五路并行多跑两条（`readRemotes` + `for-each-ref --contains`），详情给 `pushed` / `remoteRefs`。
+- 已完成（Client `client.js`）：`pushSummary()` 折出 `{state,text,color}`；列表行仅 `pushed === false` 时
+  渲染琥珀「本地」徽标（`data-history-local`）；详情在作者行下面加 `data-history-push="pushed|local|unknown"` 一行，
+  已推送列出最多 3 个远端分支名 + `+N`，可拖选复制；zh/en 各 5 个 i18n 键。
+- 已完成：中英 README 的历史页描述与 `/log`、`/commit` 契约同步新字段（含「不 fetch」与 `null` 的含义）；
+  `docs/preview-history.png` 重画（徽标 + 已推送详情行，仍是假数据）。
+- 已验证：`npm run check`（隐私检查 31 文件无命中）+ `npm test` 全绿；Host 新增
+  `60 push state with a remote OK pushed=false,true,true`、`61 push state without a remote OK pushed=null`、
+  `62 push state across page windows OK`；Client 新增 `19 push-state i18n OK: 5 keys in zh + en`；
+  交互新增 `18 local badge OK: 1 badge on a0000001 only`、`19 push state in detail OK: local / pushed / unknown / unknown`。
+- 已验证（真仓库对账）：走 route handler 拿 `/log`（7 个窗口共 133 笔）与 `/commit`（6 笔），
+  与 `git branch -r --contains` 逐笔比对 `bad=[]`；本仓库 38 笔已推送 / 10 笔只在本地（名单见 findings.md）。
+- 待确认（要用户操作）：**Host 半要重启桌面端**才生效，然后刷新页面；历史列表该出现「本地」徽标，点开未推送的提交详情应写「未推送 · 只在本地的分支上」。
+- 未做：overflow 分支无实测（见 findings.md）；未升版本（仍 0.6.0）、未改市场索引、未推送（发版另行授权）。
