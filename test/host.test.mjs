@@ -724,6 +724,7 @@ assert.deepEqual(r.json, {
   commits: [],
   hasMore: false,
   truncated: false,
+  hasRemote: false,
   reason: 'not-a-repository',
   filters: { branch: null, author: null },
 })
@@ -963,6 +964,7 @@ assert.deepEqual(r.json, {
   commits: [],
   hasMore: false,
   truncated: false,
+  hasRemote: false,
   reason: 'not-a-repository',
   filters: { branch: 'main', author: 't' },
 })
@@ -1102,6 +1104,71 @@ assert.equal(r.json.authors[0].name, 'Some One')
 assert.equal(r.json.truncated, true)
 assert.ok(r.json.authors[0].count > 5000, `expected a large partial count, got ${r.json.authors[0].count}`)
 console.log('59 authors buffer truncation OK', r.json.authors[0].count, r.json.truncated)
+
+// 60. 有远端时：远端已有的一笔 pushed:true，只在本地的一笔 pushed:false，hasRemote:true；
+//     /commit 同时给出它落在哪个远端分支上，符号引用 origin/HEAD 不算一支。
+const upstreamBare = join(base, 'upstream.git')
+execFileSync('git', ['init', '--bare', '-q', '-b', 'main', upstreamBare], { stdio: ['ignore', 'pipe', 'pipe'] })
+const remoted = makeRepo(join(base, 'remoted'))
+writeFileSync(join(remoted, 'a.txt'), 'one\ntwo\n')
+GIT(remoted, ...IDENTITY, 'commit', '-q', '-am', 'second')
+GIT(remoted, 'remote', 'add', 'origin', upstreamBare)
+GIT(remoted, 'push', '-q', '-u', 'origin', 'main')
+// origin/HEAD 是一个符号引用（%(symref) 非空），它的短名字会退化成一个光秃秃的 origin
+GIT(remoted, 'symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main')
+const remotedPushed = GIT(remoted, 'rev-parse', 'HEAD').trim()
+const remotedFirst = GIT(remoted, 'rev-parse', 'HEAD~1').trim()
+writeFileSync(join(remoted, 'c.txt'), 'c\n')
+GIT(remoted, 'add', 'c.txt')
+GIT(remoted, ...IDENTITY, 'commit', '-q', '-m', 'local only')
+const remotedLocal = GIT(remoted, 'rev-parse', 'HEAD').trim()
+r = await call(`/dsh-git-bar/log?dir=${dirParam(remoted)}`)
+assert.equal(r.status, 200)
+assert.equal(r.json.hasRemote, true)
+const pushedByHash = new Map(r.json.commits.map((commit) => [commit.hash, commit.pushed]))
+assert.equal(pushedByHash.get(remotedLocal), false, '远端到不了的一笔是未推送')
+assert.equal(pushedByHash.get(remotedPushed), true, 'origin/main 上的那一笔已推送')
+assert.equal(pushedByHash.get(remotedFirst), true, '远端分支的祖先也已推送')
+r = await call(`/dsh-git-bar/commit?dir=${dirParam(remoted)}&hash=${remotedPushed}`)
+assert.equal(r.status, 200)
+assert.equal(r.json.pushed, true)
+assert.deepEqual(r.json.remoteRefs, ['origin/main'])
+r = await call(`/dsh-git-bar/commit?dir=${dirParam(remoted)}&hash=${remotedLocal}`)
+assert.equal(r.status, 200)
+assert.equal(r.json.pushed, false)
+assert.deepEqual(r.json.remoteRefs, [], '没有远端分支包含这一笔')
+console.log('60 push state with a remote OK', `pushed=${[...pushedByHash.values()].join(',')}`)
+
+// 61. 没有任何远端跟踪分支的仓库：hasRemote:false，每笔都是 null —— 不能谎称“未推送”
+r = await call(`/dsh-git-bar/log?dir=${dirParam(history)}`)
+assert.equal(r.status, 200)
+assert.ok(r.json.commits.length >= 3)
+assert.equal(r.json.hasRemote, false)
+const unpushedKinds = [...new Set(r.json.commits.map((commit) => commit.pushed))]
+assert.deepEqual(unpushedKinds, [null])
+r = await call(`/dsh-git-bar/commit?dir=${dirParam(history)}&hash=${historySecond}`)
+assert.equal(r.status, 200)
+assert.equal(r.json.pushed, null)
+assert.deepEqual(r.json.remoteRefs, [])
+console.log('61 push state without a remote OK', `pushed=${unpushedKinds.map((value) => String(value)).join(',')}`)
+
+// 62. 单页窗口的反向边界：窗口只含本地那笔时仍是 false，翻到已推送的祖先仍是 true
+r = await call(`/dsh-git-bar/log?dir=${dirParam(remoted)}&limit=1`)
+assert.equal(r.json.commits.length, 1)
+assert.equal(r.json.commits[0].hash, remotedLocal)
+assert.equal(r.json.commits[0].pushed, false)
+r = await call(`/dsh-git-bar/log?dir=${dirParam(remoted)}&limit=1&skip=1`)
+assert.equal(r.json.commits[0].hash, remotedPushed)
+assert.equal(r.json.commits[0].pushed, true)
+r = await call(`/dsh-git-bar/log?dir=${dirParam(remoted)}&limit=1&skip=2`)
+assert.equal(r.json.commits[0].hash, remotedFirst, 'a root commit has an empty parent boundary')
+assert.equal(r.json.commits[0].pushed, true)
+// 远端跟踪分支本身可以当筛选条件，这一路只看得见远端已有的提交
+r = await call(`/dsh-git-bar/log?dir=${dirParam(remoted)}&branch=origin/main`)
+assert.equal(r.status, 200)
+assert.deepEqual(r.json.commits.map((commit) => commit.hash), [remotedPushed, remotedFirst])
+assert.ok(r.json.commits.every((commit) => commit.pushed === true))
+console.log('62 push state across page windows OK', remotedLocal.slice(0, 7), remotedPushed.slice(0, 7))
 
 rmSync(base, { recursive: true, force: true })
 console.log('\nALL HOST TESTS PASSED')

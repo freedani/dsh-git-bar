@@ -19,8 +19,10 @@
  * files, and a single file's unified diff; the three history routes add the
  * commit graph (`log`), one commit's file list (`commit`) and one file's diff
  * inside that commit (`commit-diff`), and `authors` lists every commit author in
- * the whole history so the graph can be filtered by one, all read-only. The two
- * POSTs switch the working tree to another branch. Only the POSTs write, and
+ * the whole history so the graph can be filtered by one, all read-only. History
+ * rows and the commit detail also say whether a remote branch holds the commit,
+ * read from `refs/remotes` without fetching. The two POSTs switch the working
+ * tree to another branch. Only the POSTs write, and
  * only by running plain `git checkout` with an argument array: no shell, and a
  * branch name that git itself refuses (`git check-ref-format --branch`) never
  * reaches the checkout.
@@ -662,11 +664,7 @@ async function readRemotes(dir) {
   const listed = await runGit(dir, ['for-each-ref', `--format=${REMOTE_FORMAT}`, 'refs/remotes'])
   if (!listed.ok) return { remotes: [], truncated: false }
   const remotes = []
-  for (const line of listed.out.split('\n')) {
-    if (line === '') continue
-    const [name, symref] = line.split('\0')
-    if (name === undefined || name === '') continue
-    if (symref !== undefined && symref !== '') continue
+  for (const name of remoteBranchNames(listed.out)) {
     const separator = name.indexOf('/')
     remotes.push({
       name,
@@ -676,6 +674,76 @@ async function readRemotes(dir) {
   }
   remotes.sort((left, right) => left.name.localeCompare(right.name))
   return { remotes: remotes.slice(0, MAX_REMOTES), truncated: remotes.length > MAX_REMOTES }
+}
+
+/**
+ * Pick the remote branches out of a `REMOTE_FORMAT` listing.
+ *
+ * A non-empty `%(symref)` marks a symbolic entry such as `origin/HEAD`, which
+ * aliases another branch instead of being one; `%(refname:short)` even prints
+ * it as the bare remote name, so keeping it would report one branch twice.
+ *
+ * @param text - `for-each-ref` output written in `REMOTE_FORMAT`.
+ * @returns the branch names, in git's order.
+ */
+function remoteBranchNames(text) {
+  const names = []
+  for (const line of text.split('\n')) {
+    if (line === '') continue
+    const [name, symref] = line.split('\0')
+    if (name === undefined || name === '') continue
+    if (symref !== undefined && symref !== '') continue
+    names.push(name)
+  }
+  return names
+}
+
+/**
+ * Decide, for one page of commits, which of them a remote branch holds.
+ *
+ * "Pushed" means reachable from a non-symbolic `refs/remotes/*` entry. One
+ * `git rev-list` answers the whole page: the page hashes are the positive
+ * starts, while `--remotes` and the parents of the page's oldest row are the
+ * negative boundary — that parent cuts off the ancestors below the window, so
+ * the output never outgrows the page. Asking per commit would cost one git
+ * process per row, sixty of them on a default page. * The boundary parents come from the page's own oldest row, which `%P` already
+ * gave us, so no extra `git rev-list` is needed to look them up. The order of
+ * the arguments is load-bearing: `--not` negates every revision that follows
+ * it, so the positive starts must come first. Anything git cannot answer is
+ * `null` rather than a guess: a repository with no remote branch has nothing to
+ * be "unpushed" against, and a failed or truncated listing says nothing about
+ * the hashes it never printed.
+ *
+ * @param dir - absolute directory.
+ * @param commits - the page's rows, in git's order, newest first.
+ * @param hasRemote - whether the repository has any non-symbolic remote branch.
+ * @returns a Map from hash to `true`, `false` or `null`.
+ */
+async function readPushedState(dir, commits, hasRemote) {
+  const pushed = new Map()
+  const hashes = commits.map((commit) => commit.hash)
+  const unknown = () => {
+    for (const hash of hashes) pushed.set(hash, null)
+    return pushed
+  }
+  if (!hasRemote) return unknown()
+  if (hashes.length === 0) return pushed
+  const oldest = commits[commits.length - 1]
+  const parents = Array.isArray(oldest.parents) ? oldest.parents : []
+  const listed = await runGit(dir, ['rev-list', ...hashes, '--not', '--remotes', ...parents], { trim: false })
+  if (!listed.ok && !listed.overflow) return unknown()
+  const localOnly = new Set()
+  for (const line of listed.out.split('\n')) {
+    const hash = line.trim()
+    if (hash !== '') localOnly.add(hash)
+  }
+  // A truncated listing still names the local commits it printed, but says
+  // nothing about the hashes it never reached — those stay unknown.
+  for (const hash of hashes) {
+    if (localOnly.has(hash)) pushed.set(hash, false)
+    else pushed.set(hash, listed.overflow ? null : true)
+  }
+  return pushed
 }
 
 /**
@@ -1088,6 +1156,10 @@ function parseLog(text) {
  * log` inside a work tree is a filter git could not resolve, and outside one it
  * is a directory that is not a repository at all.
  *
+ * Every row also carries `pushed` from `readPushedState()`, and the body carries
+ * `hasRemote` so a Client can tell "no remote branch to compare against" apart
+ * from "not pushed". The remote listing runs alongside the log itself.
+ *
  * @param dir - absolute directory, whether or not it is a repository.
  * @param limit - page size, already clamped.
  * @param filters - `{ branch, author }`, either null when that filter is off.
@@ -1101,7 +1173,8 @@ async function readLog(dir, limit, filters, skip = 0) {
   args.push('--topo-order', '--decorate=full', '-n', String(limit + 1), `--format=${LOG_FORMAT}`)
   if (skip > 0) args.push(`--skip=${skip}`)
   if (filters.author !== null) args.push(`--author=${filters.author}`)
-  const result = await runGit(dir, args, { trim: false })
+  const [result, remotes] = await Promise.all([runGit(dir, args, { trim: false }), readRemotes(dir)])
+  const hasRemote = remotes.remotes.length > 0
   if (!result.ok && !result.overflow) {
     if (await insideWorkTree(dir)) {
       return {
@@ -1110,21 +1183,28 @@ async function readLog(dir, limit, filters, skip = 0) {
           commits: [],
           hasMore: false,
           truncated: false,
+          hasRemote,
           reason: filters.branch === null ? 'invalid-author' : 'unknown-ref',
           message: failureMessage(result),
         },
       }
     }
-    return { status: 200, body: { commits: [], hasMore: false, truncated: false, reason: 'not-a-repository' } }
+    return {
+      status: 200,
+      body: { commits: [], hasMore: false, truncated: false, hasRemote, reason: 'not-a-repository' },
+    }
   }
   const commits = parseLog(result.out)
   const hasMore = commits.length > limit
+  const page = hasMore ? commits.slice(0, limit) : commits
+  const pushed = await readPushedState(dir, page, hasRemote)
   return {
     status: 200,
     body: {
-      commits: hasMore ? commits.slice(0, limit) : commits,
+      commits: page.map((commit) => ({ ...commit, pushed: pushed.get(commit.hash) ?? null })),
       hasMore,
       truncated: result.overflow,
+      hasRemote,
     },
   }
 }
@@ -1267,16 +1347,24 @@ function parseNameStatus(text) {
  * the history rows use: the detail pane shows the branch names a `/log` row
  * would print as badges, from the commit itself rather than from the loaded page.
  *
+ * Push state is read for this one commit: `for-each-ref --contains` names every
+ * remote branch that reaches it, which answers both "is it pushed" and "where",
+ * with the `%(symref)` filter of `remoteBranchNames()` so `origin/HEAD` does not
+ * count as a branch. Like the decorations, a failed read only means the pane
+ * cannot say — it is `pushed: null` with no refs, not a failed commit.
+ *
  * @param dir - absolute directory.
  * @param hash - 4..40 hex digits, already validated.
  * @returns `{ commit }` on success, or `{ failure }` holding git's own message.
  */
 async function readCommit(dir, hash) {
-  const [shown, named, decorated] = await Promise.all([
+  const [shown, named, decorated, remotes, onRemote] = await Promise.all([
     runGit(dir, ['show', '--no-ext-diff', `--format=${COMMIT_FORMAT}`, '--numstat', hash], { trim: false }),
     runGit(dir, ['diff-tree', '--no-commit-id', '--name-status', '-r', '-M', hash]),
     // 装饰信息只用于展示：读不到（老 git、奇怪配置）就当这笔提交没被引用，别把详情整体判失败。
     runGit(dir, ['show', '-s', '--decorate=full', '--format=%D', hash]),
+    readRemotes(dir),
+    runGit(dir, ['for-each-ref', `--format=${REMOTE_FORMAT}`, `--contains=${hash}`, 'refs/remotes']),
   ])
   if (!shown.ok && !shown.overflow) return { failure: failureMessage(shown) }
   if (!named.ok) return { failure: failureMessage(named) }
@@ -1286,6 +1374,11 @@ async function readCommit(dir, hash) {
   if (fields.length < 8) return { failure: 'git returned an unreadable commit record' }
   const stats = parseNumstat(cut === -1 ? '' : shown.out.slice(cut + 1))
   const rows = parseNameStatus(named.out)
+  const remoteRefs = onRemote.ok ? remoteBranchNames(onRemote.out) : []
+  // No remote branch in the repository at all is "cannot tell", not "unpushed".
+  const hasRemote = remotes.remotes.length > 0
+  let pushed = null
+  if (onRemote.ok) pushed = remoteRefs.length > 0 ? true : hasRemote ? false : null
   const files = rows.slice(0, MAX_COMMIT_FILES).map((row) => {
     const lines = stats.get(row.path)
     return {
@@ -1307,6 +1400,8 @@ async function readCommit(dir, hash) {
       subject: fields[6],
       body: (fields[7] ?? '').trim(),
       refs: decorated.ok ? parseRefs(decorated.out) : [],
+      pushed,
+      remoteRefs,
       files,
       truncated: rows.length > MAX_COMMIT_FILES || shown.overflow || named.overflow,
     },
