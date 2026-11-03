@@ -121,3 +121,11 @@
   与 `git branch -r --contains` 逐笔比对 `bad=[]`；本仓库 38 笔已推送 / 10 笔只在本地（名单见 findings.md）。
 - 待确认（要用户操作）：**Host 半要重启桌面端**才生效，然后刷新页面；历史列表该出现「本地」徽标，点开未推送的提交详情应写「未推送 · 只在本地的分支上」。
 - 未做：overflow 分支无实测（见 findings.md）；未升版本（仍 0.6.0）、未改市场索引、未推送（发版另行授权）。
+
+## 发版 0.7.0（第十一轮）
+- `chore(release): 0.7.0` = 8e07e7b95c6290483cfa94d7581011b474af084e（只改 package.json 版本与描述、市场索引里的插件描述）。
+- re-pin：README.md / README.zh.md 的直装 spec、docs/PUBLISH.zh.md 的「已发布位置」、docs/market/index.json 追加 0.7.0 条目
+  （commit 指向 8e07e7b…，publishTimestamp 1793704717），旧版本条目不动。
+- 验证：`npm run check` + `npm test` 全绿；`scripts/validate-index.mjs docs/market/index.json` →
+  「7 个版本: 0.7.0, 0.6.0, …」「默认版本安装参数 …#8e07e7b…」「索引格式校验通过」。
+- 之后：推 master（已授权）、打 annotated tag `v0.7.0` 指向最后一个 re-pin commit。
